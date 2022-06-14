@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+[[ -n $DEBUG ]] && set -x
+
+set -eou pipefail
+IFS=$'\n\t'
+
+SELF_CMD="$0"
+SELF="dpod"
+if [[ "$(basename "$0")" == kubectl-* ]]; then # invoked as plugin
+  SELF="kubectl dpod"
+fi
+
+KUBENS_DIR="${XDG_CACHE_HOME:-$HOME/.kube}/kubens"
+
+usage() {
+  cat <<EOF
+USAGE:
+  $SELF                    : describe a pod in this namespace, choose interactively
+  $SELF <NAME>             : describe the specified pod
+  $SELF -h,--help          : show this message
+EOF
+}
+
+exit_err() {
+   echo >&2 "${1}"
+   exit 1
+}
+
+current_context() {
+  $KUBECTL config current-context
+}
+
+choose_pod_interactive() {
+  # directly calling kubens via fzf might fail with a cryptic error like
+  # "$FZF_DEFAULT_COMMAND failed", so try to see if we can list namespaces
+  # locally first
+  if [[ -z "$(list_pods)" ]]; then
+    echo >&2 "error: could not list pods (is the cluster accessible?)"
+    exit 1
+  fi
+  local choice
+  choice="$(_KUBECTX_FORCE_COLOR=1 \
+    FZF_DEFAULT_COMMAND="${SELF_CMD} ${@}" \
+    fzf --ansi --no-preview || true)"
+  if [[ -z "${choice}" ]]; then
+    echo 2>&1 "error: you did not choose any of the options"
+    exit 1
+  else
+    get_pod_info "${choice}"
+  fi
+}
+
+get_pods() {
+  if [[ "$#" -eq 1 ]]; then
+     $KUBECTL get pods -o=jsonpath='{range .items[*].metadata.name}{@}{"\n"}{end}' | grep $1
+  else
+    $KUBECTL get pods -o=jsonpath='{range .items[*].metadata.name}{@}{"\n"}{end}'
+  fi
+}
+
+get_pod_info() {
+  $KUBECTL describe pod $1
+}
+
+list_pods() {
+  local pods_list
+  pods_list=$(get_pods $@) || exit_err "error getting pods list"
+  for c in $pods_list; do
+    echo "${c}"
+  done
+}
+
+main() {
+  if [[ -z "${KUBECTL:-}" ]]; then
+    if hash kubectl 2>/dev/null; then
+      KUBECTL=kubectl
+    elif hash kubectl.exe  2>/dev/null; then
+      KUBECTL=kubectl.exe
+    else
+      echo >&2 "kubectl is not installed"
+      exit 1
+    fi
+  fi
+  if [[ "$#" -eq 0 ]]; then
+    if [[ -t 1 && -z ${KUBECTX_IGNORE_FZF:-} && "$(type fzf &>/dev/null; echo $?)" -eq 0 ]]; then
+      choose_pod_interactive
+    else
+	list_pods
+    fi
+  elif [[ "$#" -eq 1 ]]; then
+    if [[ "${1}" == '-h' || "${1}" == '--help' ]]; then
+      usage
+    else
+	if [[ -t 1 && -z ${KUBECTX_IGNORE_FZF:-} && "$(type fzf &>/dev/null; echo $?)" -eq 0 ]]; then
+      	  choose_pod_interactive "$@"
+    	else
+	  list_pods "$@"
+    	fi
+    fi
+  else
+    echo "error: too many flags" >&2
+    usage
+    exit 1
+  fi
+}
+
+main "$@"
+
